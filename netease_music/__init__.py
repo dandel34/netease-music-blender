@@ -15,7 +15,7 @@ Blender 之外直接 import 做单元测试。
 bl_info = {
     "name": "NetEase Cloud Music（网易云音乐）",
     "author": "DSH",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (3, 6, 0),
     "location": "3D 视图 → 侧栏 N → 网易云音乐",
     "description": "在 Blender 内登录网易云音乐，浏览歌单 / 每日推荐 / 私人雷达，播放并显示可拖动的动态歌词",

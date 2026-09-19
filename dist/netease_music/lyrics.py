@@ -81,6 +81,20 @@ def build_timeline(lrc_text: str, translated_text: str = "") -> list:
     return timeline
 
 
+def counts_for(total: int) -> tuple:
+    """把「显示几行」换算成 ``(当前行之上几行, 当前行之下几行)``。
+
+    当前句永远居中：1 行 → (0, 0)；3 行 → (1, 1)；5 行 → (2, 2)。
+    偶数会被就近取整（4 行 → (2, 1)）。
+    """
+    try:
+        total = max(1, int(total))
+    except (TypeError, ValueError):
+        total = 1
+    above = total // 2
+    return above, total - 1 - above
+
+
 def index_at(timeline, position: float) -> int:
     """``position``（秒）对应的歌词下标；还没唱到第一句时返回 ``-1``。"""
     if not timeline:

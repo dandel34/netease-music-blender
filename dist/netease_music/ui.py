@@ -262,6 +262,7 @@ class NM_PT_main(Panel):
 
         if settings is not None:
             col = box.column(align=True)
+            col.prop(settings, "lyric_line_count")
             col.prop(settings, "lyric_font_size")
             col.prop(settings, "lyric_bg_opacity")
             row = col.row(align=True)
@@ -275,20 +276,32 @@ class NM_PT_main(Panel):
     # ------------------------------------------------------------ 歌词文本
 
     def _lyric_text(self, layout, st):
+        settings = runtime.prefs(context=bpy.context)
         box = layout.box()
         row = box.row(align=True)
         row.label(text="歌词", icon="TEXT")
         row.operator("netease.load_lyric", text="", icon="FILE_REFRESH")
         row.prop(st, "show_lyric", text="", icon="HIDE_OFF" if st.show_lyric else "HIDE_ON")
 
+        multi_line = True
+        try:
+            multi_line = int(getattr(settings, "lyric_line_count", "1") or 1) > 1
+        except (TypeError, ValueError):
+            multi_line = False
+
         if st.lyric_line:
             box.label(text=st.lyric_line[:70])
             if st.lyric_translation:
                 box.label(text=st.lyric_translation[:70], icon="BOOKMARKS")
-            if st.lyric_next:
+            if multi_line and st.lyric_next:
                 box.label(text="下一句：%s" % st.lyric_next[:60], icon="FORWARD")
         elif st.current_id:
-            box.label(text="还没有歌词（播放时会自动加载）", icon="INFO")
+            if st.lyric_count:
+                box.label(text="这句还没开始唱", icon="INFO")
+            else:
+                box.label(text="纯音乐 / 无歌词：浮层只显示歌名与歌手", icon="INFO")
+        else:
+            box.label(text="还没有播放任何歌曲", icon="INFO")
 
         if st.show_lyric and st.lyric:
             lines = [line for line in st.lyric.splitlines() if line.strip()][:14]

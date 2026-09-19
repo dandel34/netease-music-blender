@@ -68,6 +68,17 @@ class NM_Preferences(AddonPreferences):
         name="播放时自动加载歌词", default=True,
         description="开始播放一首歌时自动取歌词（面板与浮层都要用它）",
     )
+    lyric_line_count: EnumProperty(
+        name="歌词显示行数",
+        items=[
+            ("1", "1 行（仅当前句）", "只显示正在唱的这一句 + 翻译，最干净"),
+            ("3", "3 行", "上一句 + 当前句 + 下一句"),
+            ("5", "5 行", "前后各两句"),
+            ("7", "7 行", "前后各三句"),
+        ],
+        default="1",
+        description="当前句始终居中；纯音乐或无歌词时只显示歌名与歌手",
+    )
     lyric_font_size: IntProperty(name="歌词字号", default=26, min=12, max=96)
     lyric_bg_opacity: FloatProperty(
         name="背景不透明度", default=0.55, min=0.0, max=1.0, subtype="FACTOR",
@@ -115,6 +126,7 @@ class NM_Preferences(AddonPreferences):
         box = layout.box()
         box.label(text="动态歌词浮层", icon="TEXT")
         box.prop(self, "auto_load_lyric")
+        box.prop(self, "lyric_line_count")
         box.prop(self, "lyric_font_size")
         box.prop(self, "lyric_bg_opacity")
         box.prop(self, "lyric_show_translation")

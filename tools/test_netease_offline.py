@@ -331,6 +331,22 @@ def test_lyrics():
     check("纯文本不炸", lyrics.parse_lrc("这不是歌词\n随便写点什么") == [])
     check("坏时间戳不炸", lyrics.index_at(four, "abc") == -1)
 
+    check("行数换算：1 行只取当前句", lyrics.counts_for(1) == (0, 0), lyrics.counts_for(1))
+    check("行数换算：3/5/7 行前后对称",
+          [lyrics.counts_for(n) for n in (3, 5, 7)] == [(1, 1), (2, 2), (3, 3)],
+          [lyrics.counts_for(n) for n in (3, 5, 7)])
+    check("行数换算：偶数与非法值有兜底",
+          lyrics.counts_for(4) == (2, 1) and lyrics.counts_for(0) == (0, 0)
+          and lyrics.counts_for("1") == (0, 0) and lyrics.counts_for("x") == (0, 0),
+          [lyrics.counts_for(v) for v in (4, 0, "1", "x")])
+
+    one = lyrics.window(four, 2.5, *lyrics.counts_for(1))
+    three = lyrics.window(four, 2.5, *lyrics.counts_for(3))
+    check("1 行模式只返回当前句",
+          [item[1]["text"] for item in one["items"]] == ["b"] and one["index"] == 1, one)
+    check("3 行模式返回上下文",
+          [item[1]["text"] for item in three["items"]] == ["a", "b", "c"], three)
+
 
 def test_cache_limit():
     print("== 缓存上限 ==")

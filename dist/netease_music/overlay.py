@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import bpy
 
-from . import runtime, utils
+from . import lyrics as lyrics_mod, runtime, utils
 
 try:  # pragma: no cover - 取决于 Blender 构建
     import blf
@@ -62,8 +62,8 @@ def _text_width(text: str, size: int, measure=None) -> float:
 
 def _trim_lines(items, max_lines: int) -> list:
     """行数放不下时，优先丢“当前行之前”的历史行，再丢末尾的后续行。"""
-    if not items:
-        return [(0, {"text": "♪ 暂无歌词 ♪", "tr": ""})]
+    if not items or max_lines <= 0:
+        return []
     if len(items) <= max_lines:
         return list(items)
     current = next((index for index, (offset, _item) in enumerate(items) if offset == 0), 0)
@@ -75,9 +75,15 @@ def _trim_lines(items, max_lines: int) -> list:
     return trimmed
 
 
+def line_counts(settings) -> tuple:
+    """当前设置下要取「当前行之上/之下」各几行（偏好里是 1/3/5/7 行）。"""
+    raw = getattr(settings, "lyric_line_count", "1") if settings is not None else "1"
+    return lyrics_mod.counts_for(raw)
+
+
 def _layout(width, height, st, settings, window, font_size: int, measure=None) -> dict:
     others_size = max(9, int(font_size * 0.72))
-    title_size = max(8, int(font_size * 0.60))
+    header_size = max(8, int(font_size * 0.60))
     translation_size = max(8, int(font_size * 0.66))
     padding = max(8.0, font_size * 0.55)
     spacing = font_size * 1.62
@@ -87,26 +93,43 @@ def _layout(width, height, st, settings, window, font_size: int, measure=None) -
     show_translation = bool(getattr(settings, "lyric_show_translation", True))
     opacity = float(getattr(settings, "lyric_bg_opacity", 0.55) or 0.0)
 
+    items = list((window or {}).get("items") or [])
+    has_lyric = bool(items)
+
     title_text = ""
-    if show_title and getattr(st, "current_name", ""):
+    if getattr(st, "current_name", ""):
         title_text = st.current_name
         if getattr(st, "current_artists", ""):
             title_text += " - " + st.current_artists
 
-    items = list((window or {}).get("items") or [])
+    # 纯音乐 / 无歌词：整块只显示歌名与歌手（不再塞“暂无歌词”占位，
+    # 也不受“显示歌名与歌手”开关影响——否则浮层就空了）
+    if not has_lyric:
+        title_is_main = True
+        if not title_text:
+            title_text = "♪ 未在播放 ♪"
+    else:
+        title_is_main = False
+        if not show_title:
+            title_text = ""
+
     translation = ""
-    if show_translation:
+    if has_lyric and show_translation:
         for offset, item in items:
             if offset == 0:
                 translation = item.get("tr") or ""
                 break
 
+    title_size = font_size if title_is_main else header_size
     title_h = title_size * 1.9 if title_text else 0.0
     translation_h = translation_size * 1.5 if translation else 0.0
+
     # 视口矮的时候先减行数，保证底板不出界
-    available = max(spacing, height - 12.0 - padding * 2.0 - progress_h - 6.0 - title_h - translation_h)
-    max_lines = max(1, int(available / spacing))
-    visible = _trim_lines(items, max_lines)
+    if has_lyric:
+        available = max(spacing, height - 12.0 - padding * 2.0 - progress_h - 6.0 - title_h - translation_h)
+        visible = _trim_lines(items, max(1, int(available / spacing)))
+    else:
+        visible = []
 
     box_w = min(max(280.0, font_size * 22.0), max(120.0, width - 24.0), 760.0)
     box_h = padding * 2.0 + len(visible) * spacing + progress_h + 6.0 + title_h + translation_h
@@ -130,8 +153,9 @@ def _layout(width, height, st, settings, window, font_size: int, measure=None) -
     cursor_y = box_y + box_h - padding
     if title_text:
         cursor_y -= title_size * 1.3
+        color = (1.0, 0.94, 0.94, 0.96) if title_is_main else (0.86, 0.86, 0.90, 0.85)
         texts.append({"text": title_text, "size": title_size, "center_y": cursor_y,
-                      "color": (0.86, 0.86, 0.90, 0.85), "center_x": box_x + box_w / 2.0})
+                      "color": color, "center_x": box_x + box_w / 2.0, "title": True})
 
     for offset, item in visible:
         cursor_y -= spacing
@@ -158,7 +182,7 @@ def _layout(width, height, st, settings, window, font_size: int, measure=None) -
                       "color": ACCENT})
 
     return {"rects": rects, "texts": texts, "box": (box_x, box_y, box_w, box_h),
-            "lines": len(visible), "font_size": font_size}
+            "lines": len(visible), "font_size": font_size, "has_lyric": has_lyric}
 
 
 def build_scene(width: int, height: int, st, settings, window, measure=None) -> dict:
@@ -246,7 +270,7 @@ def draw():
             blf.size(font_id, int(size))
             return blf.dimensions(font_id, text)[0]
 
-        window = runtime.lyric_window(st)
+        window = runtime.lyric_window(st, *line_counts(settings))
         scene_data = build_scene(region.width, region.height, st, settings, window, measure=measure)
 
         shader = _get_shader()

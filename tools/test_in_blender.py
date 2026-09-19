@@ -513,6 +513,9 @@ def test_lyric_overlay():
     st.duration = 200.0
     st.position = 6.0
     runtime.update_lyric_position(st)
+    settings.lyric_line_count = "3"          # 多行模式：验证上下文都在
+    settings.lyric_show_title = True
+    settings.lyric_show_translation = True
 
     result["timeline_lines"] = st.lyric_count
     result["current_line"] = st.lyric_line
@@ -520,8 +523,9 @@ def test_lyric_overlay():
     result["next_line"] = st.lyric_next
     result["index"] = st.lyric_index
     result["panel_text"] = st.lyric[:12]
+    result["line_counts_3"] = list(overlay.line_counts(settings))
 
-    window = runtime.lyric_window(st)
+    window = runtime.lyric_window(st, *overlay.line_counts(settings))
     result["window_offsets"] = [offset for offset, _item in window["items"]]
 
     scene = overlay.build_scene(1280, 720, st, settings, window)
@@ -549,13 +553,85 @@ def test_lyric_overlay():
     result["clamp"] = [overlay.clamp_position(v) for v in (-1.0, 0.5, 2.0, "bad")]
 
     runtime.clear_lyric(st)
-    empty = overlay.build_scene(800, 600, st, settings, {"index": -1, "items": []})
-    result["empty_placeholder"] = any("暂无歌词" in item["text"] for item in empty["texts"])
     result["cleared"] = (st.lyric_line, st.lyric_count, st.lyric_index)
-
-    # 复位，避免影响后续步骤
-    st.position = 0.0
+    settings.lyric_line_count = "1"
+    st.position = 0.0                     # 复位，避免影响后续步骤
     return result
+
+
+def test_lyric_lines_and_instrumental():
+    """默认 1 行（当前句 + 翻译）；纯音乐/无歌词时只显示歌名与歌手。"""
+    from netease_music import overlay, runtime
+    st = bpy.context.scene.netease
+    settings = runtime.prefs()
+    result = {}
+
+    old_count = settings.lyric_line_count
+    old_title = settings.lyric_show_title
+    old_translation = settings.lyric_show_translation
+    try:
+        settings.lyric_show_title = True
+        settings.lyric_show_translation = True
+        result["counts_by_preset"] = {value: list(lyrics_counts(value)) for value in ("1", "3", "5", "7")}
+
+        runtime.set_lyric(st, {
+            "lrc": "[00:01.00]第一句\n[00:05.00]第二句\n[00:09.00]第三句\n[00:13.00]第四句",
+            "translated": "[00:05.00]translated second",
+            "merged": "整段",
+        }, "song-1")
+        st.current_name = "测试歌曲"
+        st.current_artists = "测试歌手"
+        st.position = 6.0
+        runtime.update_lyric_position(st)
+
+        # 默认：只画当前句 + 翻译
+        settings.lyric_line_count = "1"
+        one = overlay.build_scene(1000, 600, st, settings, runtime.lyric_window(st, *overlay.line_counts(settings)))
+        lyric_texts = [item["text"] for item in one["texts"] if not item.get("title")]
+        result["one_line_texts"] = lyric_texts
+        result["one_line_has_title"] = any(item.get("title") for item in one["texts"])
+        result["one_line_no_next"] = not any("第三句" in text for text in lyric_texts)
+        result["one_line_translation"] = "translated second" in lyric_texts
+        result["one_line_box_h"] = round(one["box"][3], 1)
+
+        # 3 行：上下文都出来
+        settings.lyric_line_count = "3"
+        three = overlay.build_scene(1000, 600, st, settings, runtime.lyric_window(st, *overlay.line_counts(settings)))
+        three_texts = [item["text"] for item in three["texts"] if not item.get("title")]
+        result["three_line_texts"] = three_texts
+        result["three_line_box_h"] = round(three["box"][3], 1)
+        result["three_taller_than_one"] = three["box"][3] > one["box"][3]
+
+        # 纯音乐 / 无歌词：只显示歌名与歌手
+        runtime.clear_lyric(st)
+        instrumental = overlay.build_scene(1000, 600, st, settings, {"index": -1, "items": []})
+        result["instrumental_texts"] = [item["text"] for item in instrumental["texts"]]
+        result["instrumental_title_only"] = (
+            len(instrumental["texts"]) == 1
+            and instrumental["texts"][0]["text"] == "测试歌曲 - 测试歌手"
+            and instrumental["texts"][0].get("title")
+        )
+        result["instrumental_no_placeholder"] = not any(
+            "暂无歌词" in item["text"] or "纯音乐" in item["text"] for item in instrumental["texts"]
+        )
+        result["instrumental_size_is_main"] = instrumental["texts"][0]["size"] == settings.lyric_font_size
+        result["has_lyric_flag"] = [one["has_lyric"], instrumental["has_lyric"]]
+
+        # 没在播放时给个占位，不至于空一块
+        st.current_name = ""
+        st.current_artists = ""
+        idle = overlay.build_scene(1000, 600, st, settings, {"index": -1, "items": []})
+        result["idle_texts"] = [item["text"] for item in idle["texts"]]
+    finally:
+        settings.lyric_line_count = old_count
+        settings.lyric_show_title = old_title
+        settings.lyric_show_translation = old_translation
+    return result
+
+
+def lyrics_counts(value):
+    from netease_music import lyrics
+    return lyrics.counts_for(value)
 
 
 def test_icon_names():
@@ -712,12 +788,13 @@ def main():
     step("15 Cookie 解析", test_cookie_helpers)
     step("16 加入我喜欢的音乐", test_like_flow)
     step("17 动态歌词浮层布局", test_lyric_overlay)
-    step("18 图标名校验", test_icon_names)
-    step("19 中文字体度量", test_cjk_text)
-    step("20 缓存上限（运行时）", test_cache_runtime)
-    step("21 浮层注册与快捷键", test_overlay_registration)
-    step("22 新接口清单", test_new_surface)
-    step("23 注销并重注册", test_reregister)
+    step("18 歌词行数与纯音乐显示", test_lyric_lines_and_instrumental)
+    step("19 图标名校验", test_icon_names)
+    step("20 中文字体度量", test_cjk_text)
+    step("21 缓存上限（运行时）", test_cache_runtime)
+    step("22 浮层注册与快捷键", test_overlay_registration)
+    step("23 新接口清单", test_new_surface)
+    step("24 注销并重注册", test_reregister)
 
     out = os.path.join(TMP, "blender_report.json")
     with open(out, "w", encoding="utf-8") as fh:

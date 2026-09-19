@@ -202,7 +202,8 @@ def lyric_timeline() -> list:
     return LYRIC["timeline"]
 
 
-def lyric_window(st, above: int = 1, below: int = 2) -> dict:
+def lyric_window(st, above: int = 0, below: int = 0) -> dict:
+    """浮层要画的内容：默认只取当前这一句（行数由偏好设置决定）。"""
     return lyrics_mod.window(LYRIC["timeline"], st.position, above, below)
 
 
