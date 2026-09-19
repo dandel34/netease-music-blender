@@ -556,6 +556,28 @@ class NM_OT_reset_lyric_pos(NM_Base, Operator):
         return _ok(self, "歌词位置已重置")
 
 
+class NM_OT_fix_audio_stutter(NM_Base, Operator):
+    bl_idname = "netease.fix_audio_stutter"
+    bl_label = "一键抗卡顿"
+    bl_description = ("渲染（尤其 Cycles）时音频爆音/卡顿？这会把音频缓冲加大、打开内存缓存、"
+                      "并优先使用 OpenAL 后端；随时可以在偏好设置里改回去")
+
+    def execute(self, context):
+        settings = runtime.prefs(context)
+        if settings is None:
+            return _fail(self, "读不到插件偏好设置")
+        settings.audio_buffer_frames = "8192"
+        settings.ram_cache_sound = True
+        settings.audio_backend = "OpenAL"
+        runtime.apply_audio_settings(context)
+        engine = runtime.engine()
+        if engine.is_active and (engine.backend, engine.buffer_frames) != ("OpenAL", 8192):
+            return _ok(self, "已改为抗卡顿配置，当前这首歌放完后生效")
+        if not engine.ensure_device():
+            return _fail(self, engine.last_error or "打开音频设备失败")
+        return _ok(self, "已切到抗卡顿配置：%s" % (engine.last_device or "已应用"))
+
+
 class NM_OT_trim_cache(NM_Base, Operator):
     bl_idname = "netease.trim_cache"
     bl_label = "立即清理到上限"
@@ -662,6 +684,13 @@ class NM_OT_self_test(NM_Base, Operator):
             lines.append("  [%s] %s%s" % ("通过" if ok else "失败", name, "" if ok else "  " + detail))
             failed += 0 if ok else 1
         lines.append("  aud 模块：%s" % ("可用" if player.aud_available() else player.aud_error()))
+        engine = runtime.engine()
+        engine.ensure_device()          # 顺便把设备打开，好把真实后端/缓冲报出来
+        lines.append("  音频设备：%s" % (engine.last_device or engine.last_error or "尚未打开"))
+        lines.append("  内存缓存：%s（约 %.0f MB/分钟）"
+                     % ("开" if engine.ram_cache else "关", player.RAM_PER_MINUTE_MB))
+        if engine.last_error and engine.last_device:
+            lines.append("  设备提示：%s" % engine.last_error)
         lines.append("")
         lines.append("== 接口连通性 ==")
         session = runtime.client(context)
@@ -721,6 +750,7 @@ CLASSES = (
     NM_OT_drag_lyric,
     NM_OT_reset_lyric_pos,
     NM_OT_trim_cache,
+    NM_OT_fix_audio_stutter,
     NM_OT_open_in_browser,
     NM_OT_open_cache,
     NM_OT_clear_cache,

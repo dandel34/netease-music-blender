@@ -462,6 +462,75 @@ def test_runtime_tick():
     return {"interval": interval, "callbacks": done["n"], "status": st.status_text}
 
 
+def test_audio_engine_config():
+    """音频设备参数（后端 / 缓冲）与内存缓存：抗卡顿默认值、非法值兜底、后端回退、子线程解码。"""
+    from netease_music import jobs, player, runtime
+    settings = runtime.prefs()
+    engine = runtime.engine()
+    result = {}
+    old = (settings.audio_backend, settings.audio_buffer_frames, settings.ram_cache_sound)
+    try:
+        settings.audio_backend = "auto"
+        settings.audio_buffer_frames = "4096"
+        settings.ram_cache_sound = True
+        engine.stop()
+        runtime.apply_audio_settings(bpy.context)
+        result["frames_4096"] = {"requested": settings.audio_buffer_frames,
+                                 "applied": engine.buffer_frames, "device": engine.last_device}
+
+        settings.audio_buffer_frames = "16384"
+        engine.stop()
+        runtime.apply_audio_settings(bpy.context)
+        result["device_rebuilt"] = "16384" in (engine.last_device or "")
+        result["frames_16384"] = engine.buffer_frames
+
+        # 枚举本身会挡住非法值；但存档里可能留着旧版本/被删掉的值，函数要能兜底
+        class _FakeSettings:
+            audio_buffer_frames = "abc"
+
+        class _NoneSettings:
+            audio_buffer_frames = None
+
+        result["invalid_buffer"] = [runtime.buffer_frames(_FakeSettings()),
+                                    runtime.buffer_frames(_NoneSettings())]
+
+        # 本机不存在的后端要能退回默认后端，而不是直接播不了
+        engine.stop()
+        ok = engine.ensure_device("PulseAudio", 8192)
+        result["backend_fallback"] = {"ok": ok, "device": engine.last_device,
+                                      "last_error": (engine.last_error or "")[:60]}
+
+        engine.stop()
+        bpy.ops.netease.fix_audio_stutter()
+        result["after_fix"] = {"backend": settings.audio_backend,
+                               "frames": settings.audio_buffer_frames,
+                               "ram_cache": settings.ram_cache_sound,
+                               "applied_frames": engine.buffer_frames,
+                               "device": engine.last_device}
+
+        # 子线程里解码 + 内存缓存（插件真实路径就是这样，避免卡界面）
+        path = player.cache_path(runtime.cache_dir(bpy.context), "33894312", "exhigh", "")
+        if os.path.isfile(path):
+            holder = {}
+            jobs.submit("解码测试", lambda: engine.load_sound(path, True),
+                        on_done=lambda sound: holder.update({"seconds": player.sound_seconds(sound)}),
+                        on_error=lambda exc: holder.update({"error": str(exc)[:80]}))
+            deadline = time.time() + 40
+            while time.time() < deadline and not holder:
+                time.sleep(0.2)
+                runtime.tick()
+            result["thread_decode"] = {"seconds": round(holder.get("seconds", 0), 1),
+                                       "error": holder.get("error"),
+                                       "ok": holder.get("seconds", 0) > 60}
+        else:
+            result["thread_decode"] = "跳过（缓存里没有测试音频）"
+    finally:
+        settings.audio_backend, settings.audio_buffer_frames, settings.ram_cache_sound = old
+        engine.stop()
+        runtime.apply_audio_settings(bpy.context)
+    return result
+
+
 def test_reregister():
     """注销要干净（属性/面板/定时器/浮层/快捷键都摘掉），而且能重新启用。"""
     import netease_music
@@ -794,7 +863,8 @@ def main():
     step("21 缓存上限（运行时）", test_cache_runtime)
     step("22 浮层注册与快捷键", test_overlay_registration)
     step("23 新接口清单", test_new_surface)
-    step("24 注销并重注册", test_reregister)
+    step("24 音频设备与内存缓存", test_audio_engine_config)
+    step("25 注销并重注册", test_reregister)
 
     out = os.path.join(TMP, "blender_report.json")
     with open(out, "w", encoding="utf-8") as fh:

@@ -101,6 +101,29 @@ def cache_dir(context=None) -> str:
     return path or utils.default_cache_dir()
 
 
+def buffer_frames(settings) -> int:
+    """偏好里的音频缓冲帧数。默认 8192 帧 ≈ 186ms，比 aud 自带的 1024 帧抗卡顿得多。"""
+    try:
+        return int(getattr(settings, "audio_buffer_frames", "8192") or 8192)
+    except (TypeError, ValueError):
+        return 8192
+
+
+def apply_audio_settings(context=None) -> None:
+    """把偏好里的音频后端 / 缓冲 / 内存缓存应用到引擎。
+
+    只在参数真的变了、并且当前没有在播时才重建音频设备（正在播时换设备会直接断音）。
+    """
+    settings = prefs(context)
+    if settings is None:
+        return
+    backend = getattr(settings, "audio_backend", "auto") or "auto"
+    frames = buffer_frames(settings)
+    _ENGINE.ram_cache = bool(getattr(settings, "ram_cache_sound", True))
+    if (_ENGINE.backend, _ENGINE.buffer_frames) != (backend, frames):
+        _ENGINE.ensure_device(backend, frames)
+
+
 def enforce_cache_limit(context, keep: str = ""):
     """按偏好设置里的数量上限清理缓存（超出就删最旧的，正在播的那首不动）。"""
     settings = prefs(context)
@@ -367,7 +390,7 @@ def play_track(context, track: dict, quality_override: str = ""):
         )
         dest = player.cache_path(cache_dir(context), st.current_id, info.get("requested_level") or level, info.get("url") or "")
         if os.path.isfile(dest) and os.path.getsize(dest) > 0:
-            _start_playback(context, dest, st)
+            _prepare_and_play(context, dest, st)
             return
         _download_and_play(context, info.get("url") or "", dest, st)
 
@@ -397,7 +420,7 @@ def _download_and_play(context, url: str, dest: str, st):
         st.download_progress = 1.0
         st.download_text = ""
         enforce_cache_limit(context, path)
-        _start_playback(context, path, st)
+        _prepare_and_play(context, path, st)
 
     def failed(exc):
         DOWNLOAD["active"] = False
@@ -408,8 +431,40 @@ def _download_and_play(context, url: str, dest: str, st):
     jobs.submit("下载音频", work, on_done=done, on_error=failed)
 
 
-def _start_playback(context, path: str, st):
-    if _ENGINE.play_file(path, expected_duration=st.duration):
+def _prepare_and_play(context, path: str, st):
+    """在子线程里加载/解码音频，再回主线程播放。
+
+    把整段音频缓存进内存需要 0.2～2 秒（4 分钟的歌约 90MB），放主线程会卡界面，
+    所以这一步单独走后台任务；播放本身必须在主线程（要碰 Blender 的 RNA）。
+    """
+    apply_audio_settings(context)
+    PLAYBACK["loading"] = True
+    ram_cache = _ENGINE.ram_cache
+    st.set_status("正在准备音频：%s" % st.current_name)
+
+    def work():
+        return _ENGINE.load_sound(path, ram_cache)
+
+    def done(sound):
+        _start_playback(context, path, st, sound)
+
+    def failed(exc):
+        PLAYBACK["loading"] = False
+        _fail(context, "解码音频失败：%s" % exc)
+
+    jobs.submit("解码音频", work, on_done=done, on_error=failed)
+
+
+def _start_playback(context, path: str, st, sound=None):
+    apply_audio_settings(context)
+    if sound is None:
+        try:
+            sound = _ENGINE.load_sound(path, _ENGINE.ram_cache)
+        except Exception as exc:  # noqa: BLE001
+            PLAYBACK["loading"] = False
+            _fail(context, "解码音频失败：%s" % exc)
+            return
+    if _ENGINE.play_sound(sound, expected_duration=st.duration, path=path):
         PLAYBACK["started"] = time.time()
         PLAYBACK["loading"] = False
         st.is_playing = True

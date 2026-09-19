@@ -12,7 +12,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel, UIList
 
-from . import overlay, player, runtime, utils
+from . import overlay, player, preferences, runtime, utils
 
 TABS = ("account", "player", "playlists", "recommend")
 
@@ -204,6 +204,14 @@ class NM_PT_main(Panel):
         row = box.row(align=True)
         row.prop(st, "volume", slider=True)
         row.prop(st, "loop_mode", text="")
+
+        # 音频输出：渲染时爆音/卡顿就点这里
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text="音频输出", icon="SOUND")
+        row.operator("netease.fix_audio_stutter", text="一键抗卡顿", icon="CHECKMARK")
+        box.label(text="当前：%s" % preferences.engine_device_text(), icon="INFO")
+        box.label(text="Cycles 渲染时爆音/卡顿？点上面按钮（偏好里可细调）", icon="QUESTION")
 
         if st.downloading:
             dbox = layout.box()

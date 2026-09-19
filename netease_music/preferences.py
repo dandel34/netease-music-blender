@@ -22,6 +22,15 @@ TRANSPORT_ITEMS = [
 ]
 
 
+def engine_device_text() -> str:
+    """面板/偏好里显示的“当前音频设备”说明。"""
+    from . import runtime
+    engine = runtime.engine()
+    if engine.last_device:
+        return engine.last_device
+    return "%s / 缓冲 %d 帧（尚未打开设备）" % (engine.backend, engine.buffer_frames)
+
+
 class NM_Preferences(AddonPreferences):
     bl_idname = __package__
 
@@ -61,6 +70,21 @@ class NM_Preferences(AddonPreferences):
     cache_limit_count: IntProperty(
         name="最多保留（首）", default=10, min=1, max=500,
         description="缓存目录里最多保留多少个音频文件；正在播放的那一首永远不会被删",
+    )
+
+    # ------------------------------------------------------------ 音频播放（抗卡顿）
+    audio_backend: EnumProperty(
+        name="音频后端", items=player.BACKEND_ITEMS, default="auto",
+        description="播放用的音频后端；渲染时音频卡顿的话可以试试 OpenAL",
+    )
+    audio_buffer_frames: EnumProperty(
+        name="音频缓冲", items=player.BUFFER_ITEMS, default="8192",
+        description="混音缓冲越大越抗卡顿（CPU 被 Cycles 占满时尤其明显），代价只是起播略慢一点",
+    )
+    ram_cache_sound: BoolProperty(
+        name="把音频缓存进内存", default=True,
+        description="播放前把整段音频解码进内存（约 20MB/分钟），播放回调里不再读磁盘与解码；"
+                    "内存紧张时可以关掉",
     )
 
     # ------------------------------------------------------------ 动态歌词浮层
@@ -112,6 +136,15 @@ class NM_Preferences(AddonPreferences):
         row.alignment = "RIGHT"
         row.label(text="缓存：%d 个文件 / %s" % (count, player.human_size(size)))
         row.operator("netease.clear_cache", text="清空缓存", icon="TRASH")
+
+        box = layout.box()
+        box.label(text="音频（渲染时卡顿就调这里）", icon="SOUND")
+        box.prop(self, "audio_backend")
+        box.prop(self, "audio_buffer_frames")
+        box.prop(self, "ram_cache_sound")
+        row = box.row()
+        row.alignment = "RIGHT"
+        row.label(text="当前：%s" % (engine_device_text() or "尚未打开设备"), icon="INFO")
 
         box = layout.box()
         box.label(text="缓存上限", icon="DISK_DRIVE")

@@ -15,7 +15,7 @@ Blender 之外直接 import 做单元测试。
 bl_info = {
     "name": "NetEase Cloud Music（网易云音乐）",
     "author": "DSH",
-    "version": (1, 1, 1),
+    "version": (1, 2, 0),
     "blender": (3, 6, 0),
     "location": "3D 视图 → 侧栏 N → 网易云音乐",
     "description": "在 Blender 内登录网易云音乐，浏览歌单 / 每日推荐 / 私人雷达，播放并显示可拖动的动态歌词",
@@ -80,6 +80,7 @@ def register():
         settings = bpy.context.preferences.addons[__package__].preferences
         runtime.engine().set_volume(settings.default_volume)
         utils.debug_mode(settings.debug_requests)
+        runtime.apply_audio_settings(bpy.context)      # 音频后端 / 缓冲 / 内存缓存
     except Exception:  # noqa: BLE001
         pass
     _log("已启用（版本 %s）" % __version__)
