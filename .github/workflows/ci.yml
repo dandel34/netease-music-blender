@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: 语法、自检与打包一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 全部模块语法检查
+        run: python -m compileall -q netease_music tools
+
+      - name: 加密自检（FIPS-197 / NIST SP 800-38A 官方向量）
+        run: python tools/test_netease_crypto.py
+
+      - name: 离线单元测试（标准化 / 私人雷达 / Cookie / 收藏降级）
+        run: python tools/test_netease_offline.py
+
+      - name: 提交的安装包与源码一致
+        run: python tools/check_package.py
+
+      - name: 重新打包后文本产物无差异（manifest 必须与 bl_info 同步）
+        run: |
+          python tools/build_netease_music.py
+          git diff --exit-code -- netease_music/blender_manifest.toml

@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 打包并发布安装包
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 确定版本 tag（打 tag 触发用 tag 名，手动触发用 manifest 版本）
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION="$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('netease_music/blender_manifest.toml').read_text(encoding='utf-8'))['version'])")"
+            echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 打包扩展 zip
+        run: python tools/build_netease_music.py
+
+      - name: 校验产物与源码一致
+        run: python tools/check_package.py
+
+      - name: 创建/更新 Release 并附上安装包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.ver.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 已存在（例如手动重跑刷新产物）→ 覆盖附件
+            gh release upload "$TAG" dist/*.zip --clobber
+          else
+            gh release create "$TAG" dist/*.zip \
+              --title "NetEase Cloud Music ${TAG}" \
+              --generate-notes
+          fi

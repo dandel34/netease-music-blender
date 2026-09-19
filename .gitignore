@@ -1,0 +1,22 @@
+# Python / Blender
+__pycache__/
+*.py[cod]
+*.blend1
+*.blend2
+
+# 打包中间产物
+# 注意：dist/ 下的扩展 zip 是故意提交的发行产物（见 README 与 tools/check_package.py）
+
+# 本地临时文件
+.tmp/
+probe/
+*.log
+
+# 测试时可用的临时 Blender 用户目录
+user_scripts/
+user_config/
+
+# 系统杂项
+Thumbs.db
+desktop.ini
+.DS_Store

@@ -1,0 +1,13 @@
+schema_version = "1.0.0"
+
+id = "netease_music"
+version = "1.0.0"
+name = "NetEase Cloud Music"
+tagline = "在 Blender 内登录网易云音乐，浏览歌单 / 每日推荐 / 私人雷达并直接播放"
+maintainer = "DSH"
+type = "add-on"
+
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+tags = ["Sequencer", "User Interface"]
