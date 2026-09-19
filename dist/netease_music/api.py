@@ -437,13 +437,23 @@ class NeteaseClient:
             raise ApiError("这首歌没有可用的播放地址（可能无版权、需要会员或已下架，接口码 %s）" % reason)
         raise ApiError("接口没有返回播放地址")
 
-    def lyric(self, song_id: str) -> str:
+    def lyric(self, song_id: str) -> dict:
+        """取歌词。
+
+        返回 ``{"lrc": 原文 LRC, "translated": 翻译 LRC, "merged": 面板用的整段文本}``：
+        动态歌词浮层需要原始 LRC 来解析时间轴，面板则直接用整段文本。
+        """
         data = self.call("/api/song/lyric", {"id": str(song_id), "lv": -1, "kv": -1, "tv": -1})
         original = ((data.get("lrc") or {}).get("lyric") or "").strip()
         translated = ((data.get("tlyric") or {}).get("lyric") or "").strip()
+        merged = original
         if original and translated:
-            return original + "\n\n—— 翻译 ——\n" + translated
-        return original or "（这首歌没有歌词）"
+            merged = original + "\n\n—— 翻译 ——\n" + translated
+        return {
+            "lrc": original,
+            "translated": translated,
+            "merged": merged or "（这首歌没有歌词）",
+        }
 
     def likelist(self, uid: str) -> set:
         """账号里「我喜欢的音乐」的全部歌曲 ID。"""

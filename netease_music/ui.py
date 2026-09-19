@@ -12,7 +12,7 @@ from __future__ import annotations
 import bpy
 from bpy.types import Panel, UIList
 
-from . import player, runtime, utils
+from . import overlay, player, runtime, utils
 
 TABS = ("account", "player", "playlists", "recommend")
 
@@ -210,18 +210,9 @@ class NM_PT_main(Panel):
             dbox.label(text=st.download_text or "正在下载…", icon="IMPORT")
             dbox.progress(factor=st.download_progress, text="%.0f%%" % (st.download_progress * 100))
 
-        # 歌词
-        box = layout.box()
-        row = box.row(align=True)
-        row.label(text="歌词", icon="TEXT")
-        row.operator("netease.load_lyric", text="", icon="FILE_REFRESH")
-        row.prop(st, "show_lyric", text="", icon="HIDE_OFF" if st.show_lyric else "HIDE_ON")
-        if st.show_lyric and st.lyric:
-            lines = [line for line in st.lyric.splitlines() if line.strip()][:14]
-            for line in lines:
-                box.label(text=line[:70])
-            if len(st.lyric.splitlines()) > 14:
-                box.label(text="……（只显示前 14 行）", icon="INFO")
+        # 歌词（当前行）+ 动态歌词浮层
+        self._lyric_text(layout, st)
+        self._lyric_overlay(layout, st)
 
         # 队列
         box = layout.box()
@@ -234,6 +225,77 @@ class NM_PT_main(Panel):
         if len(st.tracks):
             enq = row.operator("netease.enqueue", text="加入选中", icon="ADD")
             enq.play_next = True
+
+    # ------------------------------------------------------------ 动态歌词浮层
+
+    def _lyric_overlay(self, layout, st):
+        settings = runtime.prefs(context=bpy.context)
+
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text="动态歌词浮层", icon="FONT_DATA")
+        toggle = row.operator(
+            "netease.toggle_lyric_overlay", text="",
+            icon="HIDE_OFF" if st.lyric_overlay else "HIDE_ON",
+        )
+        toggle.mode = "toggle"
+
+        if st.lyric_overlay:
+            box.label(text="已开启：跟随播放滚动，可拖动位置", icon="CHECKMARK")
+        else:
+            box.label(text="未开启（Ctrl+Alt+L 也可以开关）", icon="INFO")
+
+        info = "%d 行" % st.lyric_count if st.lyric_count else "暂无歌词"
+        if runtime.lyric_song_id() and st.current_id and runtime.lyric_song_id() != st.current_id:
+            info = "歌词与当前歌曲不匹配，点刷新"
+        box.label(text="歌词：%s" % info, icon="TEXT")
+
+        row = box.row(align=True)
+        drag = row.operator("netease.drag_lyric", text="拖动位置", icon="HAND")
+        row.operator("netease.reset_lyric_pos", text="", icon="LOOP_BACK")
+        reload_lyric = row.operator("netease.load_lyric", text="", icon="FILE_REFRESH")
+        reload_lyric.force = True
+
+        col = box.column(align=True)
+        col.prop(st, "lyric_pos_x", slider=True)
+        col.prop(st, "lyric_pos_y", slider=True)
+
+        if settings is not None:
+            col = box.column(align=True)
+            col.prop(settings, "lyric_font_size")
+            col.prop(settings, "lyric_bg_opacity")
+            row = col.row(align=True)
+            row.prop(settings, "lyric_show_translation")
+            row.prop(settings, "lyric_show_title")
+
+        error = overlay.draw_error()
+        if error:
+            box.label(text="绘制出错：%s" % error[:60], icon="ERROR")
+
+    # ------------------------------------------------------------ 歌词文本
+
+    def _lyric_text(self, layout, st):
+        box = layout.box()
+        row = box.row(align=True)
+        row.label(text="歌词", icon="TEXT")
+        row.operator("netease.load_lyric", text="", icon="FILE_REFRESH")
+        row.prop(st, "show_lyric", text="", icon="HIDE_OFF" if st.show_lyric else "HIDE_ON")
+
+        if st.lyric_line:
+            box.label(text=st.lyric_line[:70])
+            if st.lyric_translation:
+                box.label(text=st.lyric_translation[:70], icon="BOOKMARKS")
+            if st.lyric_next:
+                box.label(text="下一句：%s" % st.lyric_next[:60], icon="FORWARD")
+        elif st.current_id:
+            box.label(text="还没有歌词（播放时会自动加载）", icon="INFO")
+
+        if st.show_lyric and st.lyric:
+            lines = [line for line in st.lyric.splitlines() if line.strip()][:14]
+            for line in lines:
+                box.label(text=line[:70])
+            if len(st.lyric.splitlines()) > 14:
+                box.label(text="……（只显示前 14 行）", icon="INFO")
 
     # ------------------------------------------------------------ 歌单
 

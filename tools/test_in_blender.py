@@ -9,6 +9,7 @@
 import json
 import math
 import os
+import shutil
 import struct
 import sys
 import time
@@ -59,11 +60,20 @@ class FakeLayout:
 
 
 def test_import_register():
+    """按用户真实路径启用插件：这样 Blender 才会创建偏好对象（runtime.prefs() 才有东西）。"""
     import netease_music
-    netease_music.register()
+    enabled_via = ""
+    try:
+        result = bpy.ops.preferences.addon_enable(module="netease_music")
+        enabled_via = "addon_enable %s" % list(result)
+    except Exception as exc:  # noqa: BLE001
+        netease_music.register()
+        enabled_via = "找不到插件路径，退回直接 register()：%s" % exc
     return {
         "version": netease_music.__version__,
+        "enabled_via": enabled_via,
         "has_state": hasattr(bpy.types.Scene, "netease"),
+        "has_prefs": bpy.context.preferences.addons.get("netease_music") is not None,
         "operators": sorted(n for n in dir(bpy.ops.netease) if not n.startswith("_")),
         "panels": [c for c in ("NM_PT_main", "NM_PT_selftest") if hasattr(bpy.types, c)],
         "uils": [c for c in ("NM_UL_tracks", "NM_UL_playlists") if hasattr(bpy.types, c)],
@@ -221,11 +231,11 @@ def test_panel_draw():
 
     stub = Stub()
     stub.layout = FakeLayout()
-    for name in ("_header", "_account", "_player", "_playlists",
-                 "_recommend", "_track_list", "_footer"):
+    for name in ("_header", "_account", "_player", "_playlists", "_recommend",
+                 "_track_list", "_lyric_overlay", "_lyric_text", "_footer"):
         setattr(stub, name, getattr(ui.NM_PT_main, name).__get__(stub))
 
-    # 覆盖各种分支：未登录 / 已登录 / 已喜欢 / 播放中 / 下载中 / 有错误 / 有歌词
+    # 覆盖各种分支：未登录 / 已登录 / 已喜欢 / 播放中 / 歌词浮层 / 下载中 / 有错误
     scenarios = {
         "未登录": {"logged_in": False},
         "已登录": {"logged_in": True, "nickname": "测试用户", "user_id": "123", "vip_text": "黑胶 VIP",
@@ -235,6 +245,9 @@ def test_panel_draw():
                    "current_source": "exhigh / m4a", "duration": 200.0, "position": 30.0,
                    "show_lyric": True, "lyric": "[00:01.00] 第一行\n[00:02.00] 第二行",
                    "downloading": True, "download_progress": 0.4, "download_text": "正在下载"},
+        "歌词浮层开启": {"lyric_overlay": True, "lyric_count": 42, "lyric_line": "当前这一句",
+                         "lyric_translation": "translation", "lyric_next": "下一句",
+                         "current_id": "1", "current_name": "歌"},
         "出错": {"error_text": "第一行错误\n第二行错误", "status_text": "出错了"},
     }
     drawn = {}
@@ -450,17 +463,232 @@ def test_runtime_tick():
 
 
 def test_reregister():
+    """注销要干净（属性/面板/定时器/浮层/快捷键都摘掉），而且能重新启用。"""
     import netease_music
-    netease_music.unregister()
+    from netease_music import overlay
+    try:
+        bpy.ops.preferences.addon_disable(module="netease_music")
+        disabled_via = "addon_disable"
+    except Exception:  # noqa: BLE001
+        netease_music.unregister()
+        disabled_via = "直接 unregister()"
     unregistered = {
         "state_removed": not hasattr(bpy.types.Scene, "netease"),
         "panel_removed": not hasattr(bpy.types, "NM_PT_main"),
         "timer_removed": not bpy.app.timers.is_registered(netease_music._tick),
+        "overlay_removed": not overlay.is_registered(),
+        "keymap_removed": not overlay.keymap_registered(),
     }
-    netease_music.register()
-    return {"after_unregister": unregistered,
+    try:
+        bpy.ops.preferences.addon_enable(module="netease_music")
+        enabled_via = "addon_enable"
+    except Exception:  # noqa: BLE001
+        netease_music.register()
+        enabled_via = "直接 register()"
+    return {"disabled_via": disabled_via, "enabled_via": enabled_via, "after_unregister": unregistered,
             "state_back": hasattr(bpy.types.Scene, "netease"),
-            "timer_back": bpy.app.timers.is_registered(netease_music._tick)}
+            "timer_back": bpy.app.timers.is_registered(netease_music._tick),
+            "overlay_back": overlay.is_registered()}
+
+
+# --------------------------------------------------------------------------
+# 新功能：动态歌词浮层 + 缓存上限
+# --------------------------------------------------------------------------
+
+
+def test_lyric_overlay():
+    """歌词时间轴 + 浮层布局（纯计算，不碰 GPU）。"""
+    from netease_music import overlay, runtime
+    st = bpy.context.scene.netease
+    settings = runtime.prefs()
+    result = {}
+
+    runtime.set_lyric(st, {
+        "lrc": "[00:01.00]第一句\n[00:05.00]第二句\n[00:09.00]第三句\n[00:13.00]第四句",
+        "translated": "[00:05.00]translated second line",
+        "merged": "（面板用的整段文本）",
+    }, "song-1")
+    st.current_name = "测试歌曲"
+    st.current_artists = "测试歌手"
+    st.duration = 200.0
+    st.position = 6.0
+    runtime.update_lyric_position(st)
+
+    result["timeline_lines"] = st.lyric_count
+    result["current_line"] = st.lyric_line
+    result["translation"] = st.lyric_translation
+    result["next_line"] = st.lyric_next
+    result["index"] = st.lyric_index
+    result["panel_text"] = st.lyric[:12]
+
+    window = runtime.lyric_window(st)
+    result["window_offsets"] = [offset for offset, _item in window["items"]]
+
+    scene = overlay.build_scene(1280, 720, st, settings, window)
+    x, y, w, h = scene["box"]
+    result["box"] = [round(v, 1) for v in scene["box"]]
+    result["inside"] = x >= 0 and y >= 0 and x + w <= 1280 and y + h <= 720
+    result["rects"] = len(scene["rects"])
+    result["texts"] = len(scene["texts"])
+    result["has_current"] = any(item.get("current") and item["text"] == "第二句" for item in scene["texts"])
+    result["has_translation"] = any(item["text"] == "translated second line" for item in scene["texts"])
+    result["has_title"] = any("测试歌曲" in item["text"] for item in scene["texts"])
+    result["font_size"] = scene["font_size"]
+
+    st.lyric_drag_active = True
+    dragged = overlay.build_scene(1280, 720, st, settings, window)
+    result["drag_border_added"] = len(dragged["rects"]) - len(scene["rects"])
+    st.lyric_drag_active = False
+
+    # 小视口：不能越界，且字号会自动缩小
+    small = overlay.build_scene(240, 150, st, settings, window)
+    sx, sy, sw, sh = small["box"]
+    result["small_inside"] = sx >= 0 and sy >= 0 and sx + sw <= 240 and sy + sh <= 150
+    result["small_font"] = small["font_size"]
+
+    result["clamp"] = [overlay.clamp_position(v) for v in (-1.0, 0.5, 2.0, "bad")]
+
+    runtime.clear_lyric(st)
+    empty = overlay.build_scene(800, 600, st, settings, {"index": -1, "items": []})
+    result["empty_placeholder"] = any("暂无歌词" in item["text"] for item in empty["texts"])
+    result["cleared"] = (st.lyric_line, st.lyric_count, st.lyric_index)
+
+    # 复位，避免影响后续步骤
+    st.position = 0.0
+    return result
+
+
+def test_icon_names():
+    """源码里用到的图标必须都存在于 Blender 图标表（否则面板一打开就报错）。"""
+    import re
+    icons = set()
+    for function in bpy.types.UILayout.bl_rna.functions:
+        if function.identifier == "label":
+            for param in function.parameters:
+                if param.identifier == "icon":
+                    icons = {item.identifier for item in param.enum_items}
+    used = {}
+    root = os.path.join(ROOT, "netease_music")
+    for name in sorted(os.listdir(root)):
+        if not name.endswith(".py"):
+            continue
+        with open(os.path.join(root, name), encoding="utf-8") as fh:
+            text = fh.read()
+        for icon in re.findall(r'icon="([A-Z0-9_]+)"', text):
+            used.setdefault(icon, set()).add(name)
+    missing = {icon: sorted(files) for icon, files in used.items() if icon not in icons}
+    return {"available": len(icons), "used": len(used), "missing": missing}
+
+
+def test_cjk_text():
+    """中文歌词要能画出来：默认字体必须带 CJK 回退（用度量间接验证）。"""
+    import blf
+    blf.size(0, 24)
+    cjk = blf.dimensions(0, "中文歌词")
+    mixed = blf.dimensions(0, "海阔天空 Beyond")
+    ascii_only = blf.dimensions(0, "Beyond")
+    bundled = os.path.join(os.path.dirname(bpy.app.binary_path), "5.2",
+                           "datafiles", "fonts", "Noto Sans CJK Regular.woff2")
+    custom = None
+    if os.path.exists(bundled):
+        custom = blf.load(bundled)
+    return {
+        "cjk_width": round(cjk[0], 1), "cjk_height": round(cjk[1], 1),
+        "mixed_width": round(mixed[0], 1), "ascii_width": round(ascii_only[0], 1),
+        "cjk_has_size": cjk[0] > 40 and mixed[0] > ascii_only[0],
+        "bundled_font": os.path.basename(bundled) if os.path.exists(bundled) else None,
+        "custom_font_id": custom,
+    }
+
+
+def test_cache_runtime():
+    """按偏好设置里的上限自动清理缓存（用真实函数 + 临时目录）。"""
+    import pathlib
+
+    from netease_music import player, runtime
+    st = bpy.context.scene.netease
+    settings = runtime.prefs()
+    cache = os.path.join(TMP, "cache_case")
+    if os.path.isdir(cache):
+        shutil.rmtree(cache, ignore_errors=True)
+    os.makedirs(cache, exist_ok=True)
+    paths = []
+    for index in range(6):
+        path = os.path.join(cache, "song%d.mp3" % index)
+        pathlib.Path(path).write_bytes(b"a" * (10 * (index + 1)))
+        os.utime(path, (2000 + index, 2000 + index))
+        paths.append(path)
+
+    old_dir, old_limit, old_enabled = settings.cache_dir, settings.cache_limit_count, settings.cache_limit_enabled
+    result = {}
+    try:
+        settings.cache_dir = cache
+        settings.cache_limit_enabled = True
+        settings.cache_limit_count = 3
+        runtime.enforce_cache_limit(bpy.context, keep=paths[5])     # 第 6 首视为“正在播放”
+        left = sorted(os.path.basename(item[0]) for item in player.cache_files(cache))
+        result["kept"] = left
+        result["playing_kept"] = "song5.mp3" in left
+        result["count_within_limit_plus_playing"] = len(left) == 4
+        result["cache_text"] = st.cache_text
+
+        runtime.enforce_cache_limit(bpy.context, keep=paths[5])
+        result["idempotent"] = sorted(os.path.basename(i[0]) for i in player.cache_files(cache)) == left
+
+        settings.cache_limit_enabled = False
+        for index in range(4):
+            pathlib.Path(os.path.join(cache, "extra%d.mp3" % index)).write_bytes(b"b")
+        runtime.enforce_cache_limit(bpy.context)
+        result["disabled_does_nothing"] = len(player.cache_files(cache)) == len(left) + 4
+    finally:
+        settings.cache_dir = old_dir
+        settings.cache_limit_count = old_limit
+        settings.cache_limit_enabled = old_enabled
+        shutil.rmtree(cache, ignore_errors=True)
+    return result
+
+
+def test_overlay_registration():
+    from netease_music import overlay
+    was_handler = overlay.is_registered()
+    was_keymap = overlay.keymap_registered()
+    overlay.unregister_handler()
+    removed = not overlay.is_registered()
+    overlay.register_handler()
+    back = overlay.is_registered()
+    # 快捷键：后台模式没有 addon 键位配置，函数必须安全返回
+    overlay.unregister_keymap()
+    overlay.refresh_keymap(True)
+    keymap_after = overlay.keymap_registered()
+    overlay.refresh_keymap(False)
+    overlay.refresh_keymap(was_keymap)
+    return {"handler_was": was_handler, "handler_removed": removed, "handler_back": back,
+            "keymap_was": was_keymap, "keymap_after_enable": keymap_after,
+            "draw_error": overlay.draw_error()[:80],
+            "handler_registered_now": overlay.is_registered()}
+
+
+def test_new_surface():
+    """新功能对外的接口都在（属性、操作符、版本号）。"""
+    import netease_music
+    from netease_music import overlay, runtime
+    st = bpy.context.scene.netease
+    settings = runtime.prefs()
+    props = [name for name in ("lyric_overlay", "lyric_pos_x", "lyric_pos_y", "lyric_drag_active",
+                               "lyric_line", "lyric_translation", "lyric_next", "lyric_index",
+                               "lyric_count") if name in st.bl_rna.properties]
+    settings_props = [name for name in ("cache_limit_enabled", "cache_limit_count", "auto_load_lyric",
+                                        "lyric_font_size", "lyric_bg_opacity", "lyric_show_translation",
+                                        "lyric_show_title", "lyric_font_path", "lyric_hotkey")
+                      if name in settings.bl_rna.properties]
+    registered = {name for name in dir(bpy.ops.netease) if not name.startswith("_")}
+    operators = [name for name in ("toggle_lyric_overlay", "drag_lyric", "reset_lyric_pos", "trim_cache")
+                 if name in registered]
+    return {"version": netease_music.__version__,
+            "state_props": props, "pref_props": settings_props, "operators": operators,
+            "operator_count": len(registered),
+            "has_lyrics_module": bool(runtime.lyric_timeline() is not None),
+            "overlay_module": hasattr(overlay, "build_scene")}
 
 
 # --------------------------------------------------------------------------
@@ -483,7 +711,13 @@ def main():
     step("14 自动下一首", test_autonext)
     step("15 Cookie 解析", test_cookie_helpers)
     step("16 加入我喜欢的音乐", test_like_flow)
-    step("17 注销并重注册", test_reregister)
+    step("17 动态歌词浮层布局", test_lyric_overlay)
+    step("18 图标名校验", test_icon_names)
+    step("19 中文字体度量", test_cjk_text)
+    step("20 缓存上限（运行时）", test_cache_runtime)
+    step("21 浮层注册与快捷键", test_overlay_registration)
+    step("22 新接口清单", test_new_surface)
+    step("23 注销并重注册", test_reregister)
 
     out = os.path.join(TMP, "blender_report.json")
     with open(out, "w", encoding="utf-8") as fh:

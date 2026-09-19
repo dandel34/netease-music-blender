@@ -191,6 +191,18 @@ class NM_State(PropertyGroup):
     download_progress: FloatProperty(name="下载进度", default=0.0, subtype="FACTOR")
     download_text: StringProperty(name="下载说明", default="")
 
+    # ------------------------------------------------------------ 动态歌词浮层
+    lyric_overlay: BoolProperty(name="动态歌词浮层", default=False,
+                                description="在 3D 视图里显示跟随播放滚动的歌词，可拖动位置")
+    lyric_pos_x: FloatProperty(name="浮层水平位置", default=0.5, min=0.02, max=0.98, subtype="FACTOR")
+    lyric_pos_y: FloatProperty(name="浮层垂直位置", default=0.20, min=0.02, max=0.98, subtype="FACTOR")
+    lyric_drag_active: BoolProperty(name="正在拖动歌词", default=False)
+    lyric_line: StringProperty(name="当前歌词", default="")
+    lyric_translation: StringProperty(name="当前翻译", default="")
+    lyric_next: StringProperty(name="下一句", default="")
+    lyric_index: IntProperty(name="当前行号", default=-1)
+    lyric_count: IntProperty(name="歌词行数", default=0)
+
     # ------------------------------------------------------------ 其它
     lyric: StringProperty(name="歌词", default="", options={"SKIP_SAVE"})
     show_lyric: BoolProperty(name="显示歌词", default=False)

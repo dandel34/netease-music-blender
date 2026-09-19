@@ -65,9 +65,12 @@ def copy_sources():
         target = PKG / path.relative_to(SOURCE)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, target)
-    # 固定用 LF 写出，避免 Windows 上生成 CRLF 让产物与源码不一致
-    with open(PKG / "blender_manifest.toml", "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(MANIFEST)
+    # manifest 以 bl_info 为唯一来源：源码目录与打包目录写同一份（固定 LF）。
+    # 这样 check_package / CI 的“重新打包后无差异”才能真正守住版本号，
+    # 不会出现源码 manifest 停留在旧版本的情况。
+    for target_dir in (SOURCE, PKG):
+        with open(target_dir / "blender_manifest.toml", "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(MANIFEST)
 
 
 def build_zip():

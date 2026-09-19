@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "netease_music"
-version = "1.0.0"
+version = "1.1.0"
 name = "NetEase Cloud Music"
 tagline = "在 Blender 内登录网易云音乐，浏览歌单 / 每日推荐 / 私人雷达并直接播放"
 maintainer = "DSH"

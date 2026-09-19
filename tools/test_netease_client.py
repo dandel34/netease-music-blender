@@ -56,10 +56,14 @@ def main():
             report["song_url"] = {"error": str(exc)}
 
     try:
-        lyric = client.lyric(daily[0]["id"]) if daily else ""
-        head = lyric.splitlines()[:2]
-        print("歌词：", " | ".join(head)[:80])
-        report["lyric"] = {"lines": len(lyric.splitlines()), "head": head}
+        payload = client.lyric(daily[0]["id"]) if daily else {}
+        lrc_lines = [line for line in (payload.get("lrc") or "").splitlines() if line.strip()]
+        print("歌词：%d 行 LRC，翻译 %d 行，例如 %s"
+              % (len(lrc_lines), len((payload.get("translated") or "").splitlines()),
+                 " | ".join(lrc_lines[:2])[:70]))
+        report["lyric"] = {"lrc_lines": len(lrc_lines),
+                           "has_translation": bool(payload.get("translated")),
+                           "head": lrc_lines[:2]}
     except Exception as exc:  # noqa: BLE001
         print("歌词失败：", exc)
         report["lyric"] = {"error": str(exc)}

@@ -7,7 +7,7 @@ import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import AddonPreferences
 
-from . import player, utils
+from . import overlay, player, utils
 
 QUALITY_ITEMS = [
     (key, label, "请求该音质；拿不到时自动降级", index)
@@ -53,6 +53,38 @@ class NM_Preferences(AddonPreferences):
         description="把 Cookie 保存在 Blender 用户偏好里，重启后免登录；关闭后退出 Blender 即失效",
     )
 
+    # ------------------------------------------------------------ 缓存上限
+    cache_limit_enabled: BoolProperty(
+        name="自动清理缓存", default=True,
+        description="下载或播放新歌后，若缓存里的音频数量超过上限，就删掉最久没用的那些",
+    )
+    cache_limit_count: IntProperty(
+        name="最多保留（首）", default=10, min=1, max=500,
+        description="缓存目录里最多保留多少个音频文件；正在播放的那一首永远不会被删",
+    )
+
+    # ------------------------------------------------------------ 动态歌词浮层
+    auto_load_lyric: BoolProperty(
+        name="播放时自动加载歌词", default=True,
+        description="开始播放一首歌时自动取歌词（面板与浮层都要用它）",
+    )
+    lyric_font_size: IntProperty(name="歌词字号", default=26, min=12, max=96)
+    lyric_bg_opacity: FloatProperty(
+        name="背景不透明度", default=0.55, min=0.0, max=1.0, subtype="FACTOR",
+        description="歌词浮层底板的透明度；0 表示只画文字",
+    )
+    lyric_show_translation: BoolProperty(name="显示翻译", default=True)
+    lyric_show_title: BoolProperty(name="显示歌名与歌手", default=True)
+    lyric_font_path: StringProperty(
+        name="自定义歌词字体", subtype="FILE_PATH", default="",
+        description="留空则用 Blender 内置字体（已含中文）；也可以指定某个 ttf/otf/ttc",
+    )
+    lyric_hotkey: BoolProperty(
+        name="快捷键 Ctrl+Alt+L 开关浮层", default=True,
+        description="在 3D 视图里按 Ctrl+Alt+L 切换动态歌词浮层",
+        update=lambda self, context: overlay.refresh_keymap(self.lyric_hotkey),
+    )
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -69,6 +101,26 @@ class NM_Preferences(AddonPreferences):
         row.alignment = "RIGHT"
         row.label(text="缓存：%d 个文件 / %s" % (count, player.human_size(size)))
         row.operator("netease.clear_cache", text="清空缓存", icon="TRASH")
+
+        box = layout.box()
+        box.label(text="缓存上限", icon="DISK_DRIVE")
+        box.prop(self, "cache_limit_enabled")
+        col = box.column()
+        col.enabled = self.cache_limit_enabled
+        col.prop(self, "cache_limit_count")
+        row = col.row()
+        row.alignment = "RIGHT"
+        row.operator("netease.trim_cache", text="立即清理到上限", icon="TRASH")
+
+        box = layout.box()
+        box.label(text="动态歌词浮层", icon="TEXT")
+        box.prop(self, "auto_load_lyric")
+        box.prop(self, "lyric_font_size")
+        box.prop(self, "lyric_bg_opacity")
+        box.prop(self, "lyric_show_translation")
+        box.prop(self, "lyric_show_title")
+        box.prop(self, "lyric_font_path")
+        box.prop(self, "lyric_hotkey")
 
         box = layout.box()
         box.label(text="网络", icon="URL")

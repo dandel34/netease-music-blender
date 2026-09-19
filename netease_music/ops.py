@@ -10,10 +10,10 @@ from __future__ import annotations
 import os
 
 import bpy
-from bpy.props import BoolProperty, FloatProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy.types import Operator
 
-from . import api, crypto, jobs, player, props, runtime, utils
+from . import api, crypto, jobs, overlay, player, props, runtime, utils
 
 
 def _ok(op, message):
@@ -426,27 +426,151 @@ class NM_OT_queue_clear(NM_Base, Operator):
 class NM_OT_load_lyric(NM_Base, Operator):
     bl_idname = "netease.load_lyric"
     bl_label = "加载歌词"
-    bl_description = "获取当前歌曲的歌词"
+    bl_description = "获取当前歌曲的歌词（同时建立动态歌词的时间轴）"
+
+    force: BoolProperty(default=False, description="已经有歌词时也重新拉一次")
 
     def execute(self, context):
         st = self.st(context)
         if not st.current_id:
             return _fail(self, "还没有正在播放的歌曲")
-        session = runtime.client(context)
-        song_id = st.current_id
-
-        def done(text):
-            st.lyric = text
-            st.show_lyric = True
-            st.set_status("歌词已加载")
-
-        jobs.submit(
-            "加载歌词",
-            lambda: session.lyric(song_id),
-            on_done=done,
-            on_error=lambda exc: st.set_error("加载歌词失败：%s" % exc),
-        )
+        runtime.load_lyric(context, st.current_id, force=self.force)
+        st.show_lyric = True
         return _ok(self, "正在加载歌词…")
+
+
+# --------------------------------------------------------------------------
+# 动态歌词浮层
+# --------------------------------------------------------------------------
+
+#: 拖动过程中的原始位置（用于右键取消）
+_DRAG = {"origin": None}
+
+
+class NM_OT_toggle_lyric_overlay(NM_Base, Operator):
+    bl_idname = "netease.toggle_lyric_overlay"
+    bl_label = "动态歌词浮层"
+    bl_description = "在 3D 视图里显示/隐藏跟随播放滚动的歌词（快捷键 Ctrl+Alt+L）"
+
+    mode: EnumProperty(
+        name="模式",
+        items=[("toggle", "切换", ""), ("on", "打开", ""), ("off", "关闭", "")],
+        default="toggle",
+    )
+
+    def execute(self, context):
+        st = self.st(context)
+        if self.mode == "on":
+            st.lyric_overlay = True
+        elif self.mode == "off":
+            st.lyric_overlay = False
+        else:
+            st.lyric_overlay = not st.lyric_overlay
+        if st.lyric_overlay:
+            # 打开时如果没有歌词就顺手取一次，避免“打开了却没东西”
+            if st.current_id and not runtime.lyric_timeline():
+                runtime.load_lyric(context, st.current_id)
+            elif not st.current_id:
+                st.set_status("浮层已打开，播放一首歌就会显示歌词")
+            runtime.redraw()
+        return _ok(self, "动态歌词浮层%s" % ("已打开" if st.lyric_overlay else "已关闭"))
+
+
+class NM_OT_drag_lyric(NM_Base, Operator):
+    bl_idname = "netease.drag_lyric"
+    bl_label = "拖动歌词位置"
+    bl_description = "移动鼠标把歌词浮层拖到想要的位置：左键确认，右键/ESC 取消，方向键微调"
+
+    def invoke(self, context, event):
+        st = self.st(context)
+        if not st.lyric_overlay:
+            st.lyric_overlay = True
+        _DRAG["origin"] = (st.lyric_pos_x, st.lyric_pos_y)
+        st.lyric_drag_active = True
+        context.window_manager.modal_handler_add(self)
+        self._hint(context, "移动鼠标调整歌词位置：左键确认，右键/ESC 取消，方向键微调（Shift 加速）")
+        runtime.redraw()
+        return {"RUNNING_MODAL"}
+
+    @staticmethod
+    def _hint(context, text):
+        try:
+            context.workspace.status_text_set(text)
+        except Exception:  # noqa: BLE001
+            pass
+
+    @staticmethod
+    def _window_region(context):
+        area = getattr(context, "area", None)
+        if area is None:
+            return None
+        for region in area.regions:
+            if region.type == "WINDOW":
+                return region
+        return None
+
+    def _follow(self, context, event):
+        st = self.st(context)
+        region = self._window_region(context)
+        if region is None or region.width <= 0 or region.height <= 0:
+            return
+        st.lyric_pos_x = overlay.clamp_position((event.mouse_x - region.x) / region.width)
+        st.lyric_pos_y = overlay.clamp_position((event.mouse_y - region.y) / region.height)
+        runtime.redraw()
+
+    def modal(self, context, event):
+        st = self.st(context)
+        if event.type == "MOUSEMOVE":
+            self._follow(context, event)
+        elif event.type == "LEFTMOUSE" and event.value == "PRESS":
+            st.lyric_drag_active = False
+            self._hint(context, None)
+            return {"FINISHED"}
+        elif event.type in {"RIGHTMOUSE", "ESC"}:
+            if _DRAG["origin"]:
+                st.lyric_pos_x, st.lyric_pos_y = _DRAG["origin"]
+            st.lyric_drag_active = False
+            self._hint(context, None)
+            runtime.redraw()
+            return {"CANCELLED"}
+        elif event.type in {"LEFT", "RIGHT", "UP", "DOWN"} and event.value == "PRESS":
+            step = 0.012 if event.shift else 0.004
+            dx = -step if event.type == "LEFT" else (step if event.type == "RIGHT" else 0.0)
+            dy = -step if event.type == "DOWN" else (step if event.type == "UP" else 0.0)
+            st.lyric_pos_x = overlay.clamp_position(st.lyric_pos_x + dx)
+            st.lyric_pos_y = overlay.clamp_position(st.lyric_pos_y + dy)
+            runtime.redraw()
+        return {"RUNNING_MODAL"}
+
+
+class NM_OT_reset_lyric_pos(NM_Base, Operator):
+    bl_idname = "netease.reset_lyric_pos"
+    bl_label = "重置歌词位置"
+    bl_description = "把歌词浮层放回默认位置"
+
+    def execute(self, context):
+        st = self.st(context)
+        st.lyric_pos_x = 0.5
+        st.lyric_pos_y = 0.20
+        runtime.redraw()
+        return _ok(self, "歌词位置已重置")
+
+
+class NM_OT_trim_cache(NM_Base, Operator):
+    bl_idname = "netease.trim_cache"
+    bl_label = "立即清理到上限"
+    bl_description = "按偏好设置里的数量上限删掉最久没用的缓存文件"
+
+    def execute(self, context):
+        st = self.st(context)
+        settings = runtime.prefs(context)
+        limit = int(getattr(settings, "cache_limit_count", 0) or 0)
+        keep = runtime.engine().path
+        deleted, freed = player.enforce_cache_limit(runtime.cache_dir(context), limit, keep=(keep,))
+        runtime.refresh_cache_text(st)
+        if not deleted:
+            return _ok(self, "缓存已经在 %d 个以内" % limit)
+        return _ok(self, "已清理 %d 个文件，释放 %s" % (deleted, player.human_size(freed)))
 
 
 # --------------------------------------------------------------------------
@@ -593,6 +717,10 @@ CLASSES = (
     NM_OT_queue_remove,
     NM_OT_queue_clear,
     NM_OT_load_lyric,
+    NM_OT_toggle_lyric_overlay,
+    NM_OT_drag_lyric,
+    NM_OT_reset_lyric_pos,
+    NM_OT_trim_cache,
     NM_OT_open_in_browser,
     NM_OT_open_cache,
     NM_OT_clear_cache,

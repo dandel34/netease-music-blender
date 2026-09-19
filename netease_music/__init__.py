@@ -15,10 +15,10 @@ Blender 之外直接 import 做单元测试。
 bl_info = {
     "name": "NetEase Cloud Music（网易云音乐）",
     "author": "DSH",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (3, 6, 0),
     "location": "3D 视图 → 侧栏 N → 网易云音乐",
-    "description": "在 Blender 内登录网易云音乐，浏览歌单 / 每日推荐 / 私人雷达并直接播放",
+    "description": "在 Blender 内登录网易云音乐，浏览歌单 / 每日推荐 / 私人雷达，播放并显示可拖动的动态歌词",
     "category": "Audio",
 }
 
@@ -62,12 +62,19 @@ def _stop_timer():
 
 def register():
     import bpy
-    from . import ops, preferences, props, runtime, ui, utils
+    from . import ops, overlay, preferences, props, runtime, ui, utils
 
     props.register()
     preferences.register()
     ops.register()
     ui.register()
+    # 动态歌词浮层：绘制回调 + 快捷键
+    overlay.register_handler()
+    try:
+        settings = bpy.context.preferences.addons[__package__].preferences
+        overlay.refresh_keymap(settings.lyric_hotkey)
+    except Exception:  # noqa: BLE001
+        overlay.register_keymap()
     _start_timer()
     try:
         settings = bpy.context.preferences.addons[__package__].preferences
@@ -80,10 +87,12 @@ def register():
 
 def unregister():
     import bpy
-    from . import jobs, ops, preferences, props, runtime, ui
+    from . import jobs, ops, overlay, preferences, props, runtime, ui
 
     _stop_timer()
     jobs.cancel_all()
+    overlay.unregister_keymap()
+    overlay.unregister_handler()
     try:
         runtime.engine().stop()
     except Exception:  # noqa: BLE001

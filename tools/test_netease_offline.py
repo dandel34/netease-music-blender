@@ -17,9 +17,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))
 from netease_music import api, crypto, utils  # noqa: E402
 
 FAILED = []
+CHECKS = [0]
 
 
 def check(name, condition, detail=""):
+    CHECKS[0] += 1
     print("  [%s] %s%s" % ("通过" if condition else "失败", name, "" if condition else "  " + str(detail)))
     if not condition:
         FAILED.append(name)
@@ -283,6 +285,91 @@ def test_like():
         check("取消喜欢不走“加歌”接口", len(client.calls) == 1, client.calls)
 
 
+def test_lyrics():
+    print("== 歌词解析（动态歌词浮层用） ==")
+    from netease_music import lyrics
+
+    lrc = "\n".join([
+        "[ti:测试歌曲]",
+        "[ar:某人]",
+        "[00:01.00]第一句",
+        "[00:05.50]第二句",
+        "[00:10.00][00:20.00]重复副歌",
+        "[00:15.005]毫秒精度",
+        "",
+    ])
+    parsed = lyrics.parse_lrc(lrc)
+    check("忽略 ti/ar 元信息行", all("：" not in t and ":" not in t for _s, t in parsed), parsed)
+    check("时间戳解析（含毫秒）",
+          [round(t, 3) for t, _ in parsed] == [1.0, 5.5, 10.0, 15.005, 20.0],
+          [t for t, _ in parsed])
+    check("一行多时间戳", any(abs(t - 20.0) < 1e-9 for t, _ in parsed) and
+          [t for t, _ in parsed].count(10.0) == 1)
+    check("按时间排序", [t for t, _ in parsed] == sorted(t for t, _ in parsed))
+
+    offset = lyrics.parse_lrc("[offset:500]\n[00:10.00]偏移测试")
+    check("offset 生效（正数代表提前）", abs(offset[0][0] - 9.5) < 1e-6, offset)
+
+    timeline = lyrics.build_timeline("[00:01.00]hello\n[00:03.00]world",
+                                     "[00:01.02]你好\n[00:03.01]世界")
+    check("翻译按时间戳合并", timeline[0]["tr"] == "你好" and timeline[1]["tr"] == "世界", timeline)
+    check("没有翻译时留空", lyrics.build_timeline("[00:01.00]hello")[0]["tr"] == "")
+
+    check("index_at：还没到第一句", lyrics.index_at(timeline, 0.5) == -1)
+    check("index_at：正好到点", lyrics.index_at(timeline, 1.0) == 0)
+    check("index_at：最后一句之后", lyrics.index_at(timeline, 99.0) == 1)
+
+    four = lyrics.build_timeline("[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n[00:04.00]d")
+    win = lyrics.window(four, 2.5, above=1, below=2)
+    check("window 取上下文", win["index"] == 1 and
+          [item[1]["text"] for item in win["items"]] == ["a", "b", "c", "d"], win)
+    current, translation, following = lyrics.current_text(four, 2.5)
+    check("current_text 返回当前/翻译/下一句", (current, following) == ("b", "c"), (current, following))
+
+    check("空歌词不炸", lyrics.parse_lrc("") == [] and lyrics.index_at([], 5.0) == -1
+          and lyrics.window([], 1.0)["items"] == [])
+    check("纯文本不炸", lyrics.parse_lrc("这不是歌词\n随便写点什么") == [])
+    check("坏时间戳不炸", lyrics.index_at(four, "abc") == -1)
+
+
+def test_cache_limit():
+    print("== 缓存上限 ==")
+    import pathlib
+    import tempfile
+
+    from netease_music import player
+
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for index in range(5):
+            path = os.path.join(tmp, "song%d.mp3" % index)
+            pathlib.Path(path).write_bytes(b"x" * (100 * (index + 1)))
+            os.utime(path, (1000 + index, 1000 + index))       # 固定 mtime：下标越大越新
+            paths.append(path)
+        part = os.path.join(tmp, "half.mp3.part")
+        pathlib.Path(part).write_bytes(b"z")
+
+        listed = [os.path.basename(item[0]) for item in player.cache_files(tmp)]
+        check("列出缓存文件（按旧→新）",
+              listed == ["song0.mp3", "song1.mp3", "song2.mp3", "song3.mp3", "song4.mp3"], listed)
+        check("忽略未下完的 .part", "half.mp3.part" not in listed)
+
+        deleted, freed = player.enforce_cache_limit(tmp, 3, keep=paths[0])
+        left = sorted(os.path.basename(item[0]) for item in player.cache_files(tmp))
+        check("超出上限时删除最旧的", deleted == 1 and freed == 200, (deleted, freed))
+        check("正在播放的那首不会被删", "song0.mp3" in left, left)
+        check("保留最近使用的", left == ["song0.mp3", "song2.mp3", "song3.mp3", "song4.mp3"], left)
+        check("未超上限时不动", player.enforce_cache_limit(tmp, 10) == (0, 0))
+        check("limit<=0 表示不限", player.enforce_cache_limit(tmp, 0) == (0, 0))
+        check(".part 不受影响", os.path.exists(part))
+
+        player.touch(paths[4])
+        check("touch 更新访问时间", os.stat(paths[4]).st_mtime > 1000 + 4)
+
+        count, size = player.cache_size(tmp)
+        check("cache_size 与 cache_files 口径一致", count == 4 and size == 100 + 300 + 400 + 500, (count, size))
+
+
 def main():
     test_normalize()
     test_radar_keywords()
@@ -291,11 +378,13 @@ def main():
     test_transport_build()
     test_quality_fallback()
     test_like()
+    test_lyrics()
+    test_cache_limit()
     print()
     if FAILED:
         print("失败项：%s" % "、".join(FAILED))
         return 1
-    print("全部离线用例通过")
+    print("全部离线用例通过（%d 项）" % CHECKS[0])
     return 0
 
 

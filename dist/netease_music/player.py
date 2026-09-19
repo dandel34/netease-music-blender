@@ -355,6 +355,69 @@ def _cleanup(path: str):
         pass
 
 
+def cache_files(cache_dir: str) -> list:
+    """列出缓存里的音频文件：``[(路径, 修改时间, 大小), ...]``，按旧→新排序。"""
+    items = []
+    if not os.path.isdir(cache_dir):
+        return items
+    for name in os.listdir(cache_dir):
+        path = os.path.join(cache_dir, name)
+        if name.endswith(".part") or not os.path.isfile(path):
+            continue
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        items.append((path, stat.st_mtime, stat.st_size))
+    items.sort(key=lambda item: item[1])
+    return items
+
+
+def touch(path: str) -> None:
+    """把文件标记为“最近使用”，使缓存按 LRU 淘汰。"""
+    try:
+        os.utime(path, None)
+    except OSError:
+        pass
+
+
+def _protected_paths(keep) -> set:
+    """把 keep 归一化成绝对路径集合。
+
+    注意要支持「单个路径字符串」和「路径序列」两种写法——字符串是可迭代的，
+    如果直接 for 会把路径拆成一个个字符，保护就静默失效了（这个坑踩过）。
+    """
+    if not keep:
+        return set()
+    if isinstance(keep, (str, bytes, os.PathLike)):
+        keep = [keep]
+    return {os.path.abspath(path) for path in keep if path}
+
+
+def enforce_cache_limit(cache_dir: str, limit: int, keep=()) -> tuple:
+    """只保留最近使用的 ``limit`` 个音频文件，超出部分删掉旧的。
+
+    ``keep`` 里的路径永不删除（正在播放的那一首），可传单个路径或路径序列。
+    返回 ``(删除数量, 释放字节)``。
+    """
+    if not limit or limit <= 0:
+        return 0, 0
+    protected = _protected_paths(keep)
+    items = [item for item in cache_files(cache_dir) if os.path.abspath(item[0]) not in protected]
+    if len(items) <= limit:
+        return 0, 0
+    deleted = 0
+    freed = 0
+    for path, _mtime, size in items[:len(items) - limit]:
+        try:
+            os.remove(path)
+            deleted += 1
+            freed += size
+        except OSError:
+            pass
+    return deleted, freed
+
+
 def clear_cache(cache_dir: str) -> tuple:
     """清空缓存目录，返回 (删除文件数, 释放字节数)。"""
     count = 0
@@ -374,18 +437,20 @@ def clear_cache(cache_dir: str) -> tuple:
 
 
 def cache_size(cache_dir: str) -> tuple:
+    """统计已完成的缓存文件（与 cache_files 口径一致，不含 .part 临时文件）。"""
     count = 0
     size = 0
     if not os.path.isdir(cache_dir):
         return 0, 0
     for name in os.listdir(cache_dir):
         path = os.path.join(cache_dir, name)
-        if os.path.isfile(path):
-            count += 1
-            try:
-                size += os.path.getsize(path)
-            except OSError:
-                pass
+        if name.endswith(".part") or not os.path.isfile(path):
+            continue
+        count += 1
+        try:
+            size += os.path.getsize(path)
+        except OSError:
+            pass
     return count, size
 
 

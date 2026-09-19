@@ -19,7 +19,7 @@ import time
 
 import bpy
 
-from . import api, jobs, player, props, utils
+from . import api, jobs, lyrics as lyrics_mod, player, props, utils
 
 # --------------------------------------------------------------------------
 # 单例
@@ -35,6 +35,8 @@ DOWNLOAD = {"done": 0, "total": 0, "active": False, "name": ""}
 PLAYBACK = {"started": 0.0, "loading": False, "manual_stop": False, "last_auto_next": 0.0}
 #: 「我喜欢的音乐」ID 集合（登录后同步一次，点赞后本地同步，避免每次都问服务器）
 LIKED = {"ids": set(), "loaded": False, "uid": ""}
+#: 当前歌曲的歌词时间轴（浮层与面板共用；只有一份，切歌就换）
+LYRIC = {"song_id": "", "timeline": [], "loading": False}
 
 
 def state(context=None) -> "props.NM_State":
@@ -97,6 +99,115 @@ def cache_dir(context=None) -> str:
     settings = prefs(context)
     path = getattr(settings, "cache_dir", "") if settings else ""
     return path or utils.default_cache_dir()
+
+
+def enforce_cache_limit(context, keep: str = ""):
+    """按偏好设置里的数量上限清理缓存（超出就删最旧的，正在播的那首不动）。"""
+    settings = prefs(context)
+    if settings is None or not getattr(settings, "cache_limit_enabled", False):
+        return
+    limit = int(getattr(settings, "cache_limit_count", 0) or 0)
+    if limit <= 0:
+        return
+    deleted, freed = player.enforce_cache_limit(cache_dir(context), limit, keep=(keep,))
+    if deleted:
+        utils.log("缓存超过上限 %d 个，已清理 %d 个旧文件，释放 %s"
+                  % (limit, deleted, player.human_size(freed)))
+        refresh_cache_text(state(context))
+
+
+# --------------------------------------------------------------------------
+# 歌词：面板与动态浮层共用同一份时间轴
+# --------------------------------------------------------------------------
+
+
+def clear_lyric(st):
+    LYRIC.update({"song_id": "", "timeline": []})
+    st.lyric = ""
+    st.lyric_line = ""
+    st.lyric_translation = ""
+    st.lyric_next = ""
+    st.lyric_index = -1
+    st.lyric_count = 0
+
+
+def set_lyric(st, payload: dict, song_id: str):
+    timeline = lyrics_mod.build_timeline(payload.get("lrc") or "", payload.get("translated") or "")
+    LYRIC.update({"song_id": str(song_id), "timeline": timeline})
+    st.lyric = payload.get("merged") or "（这首歌没有歌词）"
+    st.lyric_count = len(timeline)
+    update_lyric_position(st)
+
+
+def load_lyric(context, song_id: str = "", force: bool = False):
+    """拉歌词并解析时间轴；面板与浮层都用这一条路径。"""
+    st = state(context)
+    song_id = str(song_id or st.current_id or "")
+    if not song_id:
+        st.set_error("还没有正在播放的歌曲")
+        return
+    if not force and LYRIC["song_id"] == song_id and LYRIC["timeline"]:
+        return
+    if LYRIC["loading"]:
+        return
+    session = client(context)
+    LYRIC["loading"] = True
+    st.set_status("正在加载歌词…")
+
+    def work():
+        return session.lyric(song_id)
+
+    def done(payload):
+        LYRIC["loading"] = False
+        if st.current_id and song_id != st.current_id:
+            return                     # 已经切歌，丢弃这次结果
+        set_lyric(st, payload, song_id)
+        if LYRIC["timeline"]:
+            st.set_status("歌词已加载：%d 行" % len(LYRIC["timeline"]))
+        else:
+            st.set_status("这首歌没有可解析的歌词")
+
+    def failed(exc):
+        LYRIC["loading"] = False
+        st.set_error("加载歌词失败：%s" % exc)
+
+    jobs.submit("加载歌词", work, on_done=done, on_error=failed)
+
+
+def auto_lyric_enabled(context) -> bool:
+    settings = prefs(context)
+    if settings is not None and getattr(settings, "auto_load_lyric", True):
+        return True
+    return bool(state(context).lyric_overlay)
+
+
+def update_lyric_position(st):
+    """按播放位置更新“当前行”，浮层和面板都读这几个属性。"""
+    timeline = LYRIC["timeline"]
+    if not timeline:
+        if st.lyric_line or st.lyric_index != -1:
+            st.lyric_line = ""
+            st.lyric_translation = ""
+            st.lyric_next = ""
+            st.lyric_index = -1
+        return
+    text, translation, following = lyrics_mod.current_text(timeline, st.position)
+    st.lyric_line = text
+    st.lyric_translation = translation
+    st.lyric_next = following
+    st.lyric_index = lyrics_mod.index_at(timeline, st.position)
+
+
+def lyric_timeline() -> list:
+    return LYRIC["timeline"]
+
+
+def lyric_window(st, above: int = 1, below: int = 2) -> dict:
+    return lyrics_mod.window(LYRIC["timeline"], st.position, above, below)
+
+
+def lyric_song_id() -> str:
+    return LYRIC["song_id"]
 
 
 def redraw():
@@ -235,7 +346,8 @@ def play_track(context, track: dict, quality_override: str = ""):
     st.current_id = str(track.get("id"))
     st.duration = float(track.get("duration") or 0) / 1000.0
     st.position = 0.0
-    st.lyric = ""
+    if LYRIC["song_id"] != st.current_id:
+        clear_lyric(st)          # 切歌就丢掉上一首的歌词时间轴
     st.current_liked = st.current_id in LIKED["ids"]
     st.is_playing = False
     st.is_paused = False
@@ -283,6 +395,7 @@ def _download_and_play(context, url: str, dest: str, st):
         st.downloading = False
         st.download_progress = 1.0
         st.download_text = ""
+        enforce_cache_limit(context, path)
         _start_playback(context, path, st)
 
     def failed(exc):
@@ -304,6 +417,12 @@ def _start_playback(context, path: str, st):
         st.position = 0.0
         st.set_status("正在播放：%s - %s" % (st.current_name, st.current_artists))
         st.clear_error()
+        # 播放过的文件标记为“最近使用”，让缓存按 LRU 淘汰；顺便执行数量上限
+        player.touch(path)
+        enforce_cache_limit(context, path)
+        if auto_lyric_enabled(context):
+            load_lyric(context, st.current_id)
+        update_lyric_position(st)
     else:
         PLAYBACK["loading"] = False
         _fail(context, _ENGINE.last_error or "播放失败")
@@ -618,6 +737,10 @@ def tick():
         elif not _ENGINE.is_active and st.is_playing:
             st.is_playing = False
 
+        # 歌词当前行（浮层与面板共用；没有时间轴时什么都不做）
+        if LYRIC["timeline"]:
+            update_lyric_position(st)
+
         # 缓存信息（每秒刷新一次就够）
         now = time.time()
         if now - PLAYBACK.get("cache_stamp", 0) > 3.0:
@@ -625,7 +748,7 @@ def tick():
             refresh_cache_text(st)
 
         # 有后台任务时保证界面刷新
-        if jobs.busy() or _ENGINE.is_active:
+        if jobs.busy() or _ENGINE.is_active or st.lyric_overlay:
             redraw()
     except Exception:  # noqa: BLE001 - 定时器里绝不能抛异常
         import traceback
