@@ -29,7 +29,7 @@
 
 1. 打开 Blender → **编辑 → 偏好设置 → 插件**；
 2. 右上角下拉箭头 → **从磁盘安装**；
-3. 选择 `dist/netease_music-1.2.0.zip`（也可以从 Releases 页面下载）；
+3. 选择 `dist/netease_music-1.2.1.zip`（也可以从 Releases 页面下载）；
 4. 在列表里勾选 **NetEase Cloud Music**（搜 `netease` 或 `网易云`）。
 
 适用 Blender 4.2 ～ 5.2（扩展包格式）；3.6 ～ 4.1 请用方式 B。
@@ -320,7 +320,7 @@ netease_music/
 | **中文字体度量** | 默认字体 24px 下 `中文歌词` = 96×24（4 字 × 24），混合串宽度大于纯英文 → **中文歌词可正常渲染，无需额外字体**；同时验证了 Blender 自带的 Noto Sans CJK 也能 `blf.load` |
 | **缓存上限（运行时）** | 6 个文件、上限 3、保护正在播放的第 6 首 → 保留 `song2/3/4/5`，重复执行不再变化，关掉自动清理后不再删除 |
 | **浮层注册与快捷键** | draw handler 注册/摘除可反复；后台模式没有 addon 键位配置时快捷键注册函数安全返回 |
-| 从磁盘安装 | `dist/netease_music-1.2.0.zip` 安装并启用成功，面板分类「网易云音乐」可见 |
+| 从磁盘安装 | `dist/netease_music-1.2.1.zip` 安装并启用成功，面板分类「网易云音乐」可见 |
 | 扩展包校验 | `blender --command extension validate` → Success parsing TOML |
 
 **没有验证到的部分**：

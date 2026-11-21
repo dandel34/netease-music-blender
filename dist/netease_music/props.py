@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import bpy
+from bpy.app.handlers import persistent
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -25,6 +26,8 @@ from . import utils
 PENDING_SEEK = {"value": None}
 #: 定时器回写进度时置位，防止把“同步显示”误当成“用户拖动”
 _SYNCING = {"on": False}
+#: undo 回写快照期间置位：这时改属性只是把旧值放回去，不该触发跳转等副作用
+_RESTORING = {"on": False}
 
 
 def request_seek(value: float):
@@ -47,7 +50,7 @@ def sync_seek(st, value: float):
 
 
 def _seek_updated(self, context):
-    if _SYNCING["on"]:
+    if _SYNCING["on"] or _RESTORING["on"]:
         return
     request_seek(self.seek_seconds)
 
@@ -256,6 +259,158 @@ class NM_State(PropertyGroup):
         self.error_text = ""
 
 
+# ============================================================ 撤回护栏
+#
+# Blender 的 Ctrl+Z 是「整份场景快照」级别的回滚：撤回时整个 scene（连同
+# scene.netease 这个 PropertyGroup）都会被内存文件里的旧副本替换掉，于是面板上
+# 的歌单 / 队列 / 当前歌曲 / 播放进度会一起被抹掉；而音频引擎跑在 Python 里完全
+# 不知情，面板就和实际播放脱节了。
+#
+# 办法：撤回前把 NM_State 拍成纯 Python 数据，撤回后原样写回去。别的操作照常可
+# 撤销，只有插件自己的状态不会跟着倒退。
+
+#: 撤回前留下的快照（一次 undo / redo 用一份，回写完即清）
+_UNDO_SNAPSHOT = {"data": None}
+
+
+def _state_of(scene=None):
+    """handler 拿到的 scene 可能是 undo 之后的新对象，取不到就退回当前场景。"""
+    if scene is None:
+        scene = getattr(bpy.context, "scene", None)
+    if scene is None:
+        return None
+    return getattr(scene, "netease", None)
+
+
+def _item_values(item) -> dict:
+    """把集合里的一项读成 {属性名: 值} 的纯 Python 字典。"""
+    values = {}
+    for prop in item.bl_rna.properties:
+        if prop.identifier == "rna_type" or prop.type in {"COLLECTION", "POINTER"}:
+            continue
+        try:
+            values[prop.identifier] = getattr(item, prop.identifier)
+        except Exception:  # noqa: BLE001
+            pass
+    return values
+
+
+def snapshot(st) -> dict:
+    """把 NM_State 的全部标量与三个列表拍成纯 Python 数据。"""
+    scalars = {}
+    collections = {}
+    for prop in st.bl_rna.properties:
+        ident = prop.identifier
+        if ident == "rna_type" or prop.type == "POINTER":
+            continue
+        if prop.type == "COLLECTION":
+            try:
+                collections[ident] = [_item_values(item) for item in getattr(st, ident)]
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        try:
+            scalars[ident] = getattr(st, ident)
+        except Exception:  # noqa: BLE001
+            pass
+    return {"scalars": scalars, "collections": collections}
+
+
+def restore(st, data) -> bool:
+    """把快照写回 NM_State；只在真的有差异时才动数据。"""
+    if not data:
+        return False
+    changed = False
+    _RESTORING["on"] = True
+    try:
+        for ident, items in data.get("collections", {}).items():
+            coll = getattr(st, ident, None)
+            if coll is None:
+                continue
+            if len(coll) == len(items) and [_item_values(item) for item in coll] == items:
+                continue
+            coll.clear()
+            for values in items:
+                item = coll.add()
+                for key, value in values.items():
+                    try:
+                        setattr(item, key, value)
+                    except Exception:  # noqa: BLE001
+                        pass
+            changed = True
+        # 索引类属性放在列表之后还原，否则会对着空列表被夹成 0
+        for key, value in data.get("scalars", {}).items():
+            try:
+                if getattr(st, key) == value:
+                    continue
+                setattr(st, key, value)
+                changed = True
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        _RESTORING["on"] = False
+    if changed:
+        _tag_redraw()
+    return changed
+
+
+@persistent
+def _undo_pre(scene=None, *_args):
+    """撤回（或重做）之前留底。"""
+    st = _state_of(scene)
+    if st is None:
+        return
+    try:
+        _UNDO_SNAPSHOT["data"] = snapshot(st)
+    except Exception as exc:  # noqa: BLE001
+        _UNDO_SNAPSHOT["data"] = None
+        utils.log("撤回快照失败：%s" % exc)
+
+
+@persistent
+def _undo_post(scene=None, *_args):
+    """撤回（或重做）之后把插件状态写回去。"""
+    data = _UNDO_SNAPSHOT["data"]
+    if data is None:
+        return
+    _UNDO_SNAPSHOT["data"] = None
+    st = _state_of(scene)
+    if st is None:
+        return
+    try:
+        restore(st, data)
+    except Exception as exc:  # noqa: BLE001
+        utils.log("撤回还原失败：%s" % exc)
+
+
+#: (handler 列表名, 要挂的函数)。redo 复用同一对函数：重做同样不该退回插件状态
+_UNDO_HANDLERS = (
+    ("undo_pre", _undo_pre),
+    ("undo_post", _undo_post),
+    ("redo_pre", _undo_pre),
+    ("redo_post", _undo_post),
+)
+
+
+def register_undo_guard():
+    for name, func in _UNDO_HANDLERS:
+        handlers = getattr(bpy.app.handlers, name, None)
+        if handlers is None:          # 老版本 Blender 没有这对回调
+            continue
+        if func not in handlers:
+            handlers.append(func)
+
+
+def unregister_undo_guard():
+    for name, func in _UNDO_HANDLERS:
+        handlers = getattr(bpy.app.handlers, name, None)
+        if handlers is None:
+            continue
+        while func in handlers:
+            handlers.remove(func)
+    _UNDO_SNAPSHOT["data"] = None
+
+
 CLASSES = (NM_Track, NM_Playlist, NM_State)
 
 
@@ -263,9 +418,11 @@ def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
     bpy.types.Scene.netease = PointerProperty(type=NM_State, name="网易云音乐")
+    register_undo_guard()
 
 
 def unregister():
+    unregister_undo_guard()
     if hasattr(bpy.types.Scene, "netease"):
         del bpy.types.Scene.netease
     for cls in reversed(CLASSES):
